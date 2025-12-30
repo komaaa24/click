@@ -1,4 +1,5 @@
 const { config } = require('../config');
+const logger = require('../logger');
 const { buildClickAuthHeader } = require('../utils/clickAuth');
 
 function toYYYYMMDD(date) {
@@ -40,12 +41,18 @@ async function clickApiRequest(method, path, { json } = {}) {
     body = JSON.stringify(json);
   }
 
-  const res = await fetch(url, { method, headers, body });
+  logger.info('CLICK API request', { method, url, json });
+
+  const res = await fetch(url, { method, headers, body }).catch((err) => {
+    logger.error('CLICK API network error', { method, url, error: err.message });
+    throw err;
+  });
   const contentType = res.headers.get('content-type') || '';
   const isJson = contentType.includes('application/json');
   const payload = isJson ? await res.json().catch(() => null) : await res.text().catch(() => null);
 
   if (!res.ok) {
+    logger.error('CLICK API non-200 response', { method, url, status: res.status, payload });
     const err = new Error(`CLICK API error (${res.status})`);
     err.statusCode = 502;
     err.code = 'CLICK_API_ERROR';
@@ -54,6 +61,7 @@ async function clickApiRequest(method, path, { json } = {}) {
     throw err;
   }
 
+  logger.info('CLICK API response', { method, url, status: res.status, payload });
   return payload;
 }
 
@@ -107,4 +115,3 @@ module.exports = {
   getPaymentStatusByMerchantTransId,
   reversePayment
 };
-
