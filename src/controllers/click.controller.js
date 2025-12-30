@@ -3,6 +3,17 @@ const logger = require('../logger');
 const paymentRepo = require('../repositories/payment.repository');
 const clickService = require('../services/click.service');
 const { requireInt, requireNumber, requireNonEmptyString } = require('../utils/validation');
+const { buildClickMd5Signature } = require('../utils/clickAuth');
+const { config } = require('../config');
+
+const CLICK_ACTION = {
+  PREPARE: 0,
+  COMPLETE: 1
+};
+
+function clickError(res, code, note) {
+  return res.json({ error: code, error_note: note });
+}
 
 function mapClickPaymentStatusToLocal(clickPaymentStatus) {
   if (clickPaymentStatus === 1) return 'PAID';
@@ -98,25 +109,48 @@ async function reversePayment(req, res) {
 }
 
 async function clickPrepare(req, res) {
-  const { click_trans_id, service_id, merchant_trans_id, amount, sign_time, sign_string } = req.body;
+  const {
+    click_trans_id,
+    service_id,
+    merchant_trans_id,
+    amount,
+    sign_time,
+    sign_string,
+    action
+  } = req.body;
 
   logger.info('Click PREPARE received', { body: req.body });
 
   // Validate required fields
-  if (!click_trans_id || !service_id || !merchant_trans_id || !amount) {
+  if (!click_trans_id || !service_id || !merchant_trans_id || !amount || action == null) {
     logger.error('Click PREPARE: Missing required parameters', { body: req.body });
-    return res.json({ error: -8, error_note: 'Missing required parameters' });
+    return clickError(res, -8, 'Missing required parameters');
+  }
+
+  if (Number(service_id) !== Number(config.click.serviceId)) {
+    logger.error('Click PREPARE: Invalid service_id', { body: req.body, expected: config.click.serviceId });
+    return clickError(res, -8, 'Invalid service_id');
+  }
+
+  if (Number(action) !== CLICK_ACTION.PREPARE) {
+    logger.error('Click PREPARE: Invalid action', { action });
+    return clickError(res, -3, 'Invalid action');
   }
 
   // Verify signature
-  const { config } = require('../config');
-  const { sha1Hex } = require('../utils/clickAuth');
-  const expectedSign = sha1Hex(`${click_trans_id}${service_id}${config.click.secretKey}${merchant_trans_id}${amount}${sign_time}`);
-
+  const expectedSign = buildClickMd5Signature({
+    clickTransId: click_trans_id,
+    serviceId: service_id,
+    secretKey: config.click.secretKey,
+    merchantTransId: merchant_trans_id,
+    amount,
+    action,
+    signTime: sign_time
+  });
 
   if (expectedSign !== sign_string) {
     logger.error('Click PREPARE: Invalid signature', { body: req.body, expectedSign, sign_string });
-    return res.json({ error: -1, error_note: 'Invalid signature' });
+    return clickError(res, -1, 'Invalid signature');
   }
 
   // Check if payment exists
@@ -124,21 +158,21 @@ async function clickPrepare(req, res) {
   const payment = await paymentRepo.getPaymentByMerchantTransId(merchant_trans_id);
   if (!payment) {
     logger.error('Click PREPARE: Payment not found', { merchant_trans_id });
-    return res.json({ error: -5, error_note: 'Payment not found' });
+    return clickError(res, -5, 'Payment not found');
   }
 
   // Check if payment is already processed
 
   if (payment.status === 'PAID') {
     logger.error('Click PREPARE: Payment already processed', { merchant_trans_id });
-    return res.json({ error: -4, error_note: 'Payment already processed' });
+    return clickError(res, -4, 'Payment already processed');
   }
 
   // Check amount
 
-  if (parseFloat(payment.amount) !== parseFloat(amount)) {
+  if (Number(payment.amount) !== Number(amount)) {
     logger.error('Click PREPARE: Invalid amount', { merchant_trans_id, expected: payment.amount, got: amount });
-    return res.json({ error: -2, error_note: 'Invalid amount' });
+    return clickError(res, -2, 'Invalid amount');
   }
 
   // Success
@@ -152,26 +186,52 @@ async function clickPrepare(req, res) {
 }
 
 async function clickComplete(req, res) {
-  const { click_trans_id, service_id, merchant_trans_id, merchant_prepare_id, amount, sign_time, sign_string, error } = req.body;
+  const {
+    click_trans_id,
+    service_id,
+    merchant_trans_id,
+    merchant_prepare_id,
+    amount,
+    sign_time,
+    sign_string,
+    error,
+    action
+  } = req.body;
 
   logger.info('Click COMPLETE received', { body: req.body });
 
   // Validate required fields
 
-  if (!click_trans_id || !service_id || !merchant_trans_id) {
+  if (!click_trans_id || !service_id || !merchant_trans_id || !merchant_prepare_id || action == null) {
     logger.error('Click COMPLETE: Missing required parameters', { body: req.body });
-    return res.json({ error: -8, error_note: 'Missing required parameters' });
+    return clickError(res, -8, 'Missing required parameters');
+  }
+
+  if (Number(service_id) !== Number(config.click.serviceId)) {
+    logger.error('Click COMPLETE: Invalid service_id', { body: req.body, expected: config.click.serviceId });
+    return clickError(res, -8, 'Invalid service_id');
+  }
+
+  if (Number(action) !== CLICK_ACTION.COMPLETE) {
+    logger.error('Click COMPLETE: Invalid action', { action });
+    return clickError(res, -3, 'Invalid action');
   }
 
   // Verify signature
-  const { config } = require('../config');
-  const { sha1Hex } = require('../utils/clickAuth');
-  const expectedSign = sha1Hex(`${click_trans_id}${service_id}${config.click.secretKey}${merchant_trans_id}${merchant_prepare_id}${amount}${sign_time}`);
-
+  const expectedSign = buildClickMd5Signature({
+    clickTransId: click_trans_id,
+    serviceId: service_id,
+    secretKey: config.click.secretKey,
+    merchantTransId: merchant_trans_id,
+    merchantPrepareId: merchant_prepare_id,
+    amount,
+    action,
+    signTime: sign_time
+  });
 
   if (expectedSign !== sign_string) {
     logger.error('Click COMPLETE: Invalid signature', { body: req.body, expectedSign, sign_string });
-    return res.json({ error: -1, error_note: 'Invalid signature' });
+    return clickError(res, -1, 'Invalid signature');
   }
 
   // Check if payment exists
@@ -179,13 +239,28 @@ async function clickComplete(req, res) {
   const payment = await paymentRepo.getPaymentByMerchantTransId(merchant_trans_id);
   if (!payment) {
     logger.error('Click COMPLETE: Payment not found', { merchant_trans_id });
-    return res.json({ error: -5, error_note: 'Payment not found' });
+    return clickError(res, -5, 'Payment not found');
+  }
+
+  if (payment.id !== Number(merchant_prepare_id)) {
+    logger.error('Click COMPLETE: merchant_prepare_id mismatch', {
+      merchant_trans_id,
+      merchant_prepare_id,
+      paymentId: payment.id
+    });
+    return clickError(res, -5, 'Payment not found');
+  }
+
+  if (payment.status === 'PAID') {
+    logger.error('Click COMPLETE: Payment already processed', { merchant_trans_id });
+    return clickError(res, -4, 'Payment already processed');
   }
 
   // If Click had an error, mark as failed
 
   if (error && error < 0) {
     logger.error('Click COMPLETE: Click provider error', { error, body: req.body });
+    await paymentRepo.updatePaymentStatusById(payment.id, 'CANCELED', { clickPaymentId: click_trans_id });
     return res.json({
       click_trans_id,
       merchant_trans_id,
@@ -193,6 +268,11 @@ async function clickComplete(req, res) {
       error: 0,
       error_note: 'Success'
     });
+  }
+
+  if (Number(payment.amount) !== Number(amount)) {
+    logger.error('Click COMPLETE: Invalid amount', { merchant_trans_id, expected: payment.amount, got: amount });
+    return clickError(res, -2, 'Invalid amount');
   }
 
   // Update payment status to PAID
