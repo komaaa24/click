@@ -20,6 +20,14 @@ function mapClickPaymentStatusToLocal(clickPaymentStatus) {
   return 'PENDING';
 }
 
+function clickSuccess(res, payload) {
+  return res.json({
+    error: 0,
+    error_note: 'Success',
+    ...payload
+  });
+}
+
 async function createPayment(req, res) {
   const userId = requireInt(req.body.user_id, 'user_id');
   const amount = requireNumber(req.body.amount, 'amount');
@@ -258,15 +266,16 @@ async function clickComplete(req, res) {
 
   // If Click had an error, mark as failed
 
-  if (error && error < 0) {
+  if (error && Number(error) !== 0) {
     logger.error('Click COMPLETE: Click provider error', { error, body: req.body });
-    await paymentRepo.updatePaymentStatusById(payment.id, 'CANCELED', { clickPaymentId: click_trans_id });
+    const status = Number(error) < 0 ? 'CANCELED' : 'FAILED';
+    await paymentRepo.updatePaymentStatusById(payment.id, status, { clickPaymentId: click_trans_id });
     return res.json({
       click_trans_id,
       merchant_trans_id,
       merchant_confirm_id: payment.id,
-      error: 0,
-      error_note: 'Success'
+      error: Number(error),
+      error_note: 'Failed'
     });
   }
 
@@ -278,12 +287,10 @@ async function clickComplete(req, res) {
   // Update payment status to PAID
   await paymentRepo.updatePaymentStatusById(payment.id, 'PAID', { clickPaymentId: click_trans_id });
 
-  res.json({
+  clickSuccess(res, {
     click_trans_id,
     merchant_trans_id,
-    merchant_confirm_id: payment.id,
-    error: 0,
-    error_note: 'Success'
+    merchant_confirm_id: payment.id
   });
 }
 
